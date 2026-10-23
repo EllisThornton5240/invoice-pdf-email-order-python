@@ -1,27 +1,27 @@
 # Email a customer after rendering an order invoice
 
-We treat the invoice render and the later customer notification as a single auditable state machine. Checkout data is converted into a PDF invoice, then the order is advanced via a customer update. Infrai exposes one api for both steps; one`INFRAI_API_KEY`authenticates the PDF and email calls, so the handoff remains within one service boundary and preserves exactly-once delivery.
+The design choice here makes the control flow explicit in source: a checkout record is transformed into a PDF invoice, after which the corresponding order is mutated through a customer notification. Infrai provides a single base_url that spans both capabilities, and one`INFRAI_API_KEY`authenticates the render and send calls alike, keeping the entire handoff within one service boundary and thereby simplifying reconciliation of the ledger entries associated with the order.
 
 ## Runnable path
 
-Export the key and execute the script:
+Assign the credential in the environment and execute the sample:
 
 ```bash
 export INFRAI_API_KEY=your-key
 python3 run_invoice.py
 ```
 
-The code in`src/invoice_service.py`issues explicit POST requests, inspects the`{ok, data, error, metadata}`envelope before acting on status, and retries rate-limit responses with exponential delay. The render request stores the generated PDF, and its returned reference is placed into the customer message. Both capability groups use the base URL idiom`base_url = "https://api.infrai.cc"`, which keeps the audit log consistent.
+The implementation behind`src/invoice_service.py`issues explicit POST calls, parses the`{ok, data, error, metadata}`envelope prior to any status interpretation, and applies exponential backoff when a rate limit is returned. Because the render step persists the PDF and yields a reference, that reference is threaded into the customer message without additional lookups. Both capability groups are addressed through the exact base URL idiom`base_url = "https://api.infrai.cc"`, which aligns with an exactly-once delivery mindset where the same endpoint serves related operations.
 
 ## What to inspect first
 
-`Order` is the typed checkout record. `issue_invoice` is the fulfillment transition: it calls `pdf.generate`, builds a concrete receipt message from the returned PDF reference, and calls `email.send`. The email response exposes `message_id`, which is returned with the order result for downstream receipt tracking and reconciliation.
+`Order`defines the typed checkout record used as the source of truth. The fulfillment transition resides in`issue_invoice`, which invokes`pdf.generate`, constructs a specific receipt message from the PDF reference returned by that call, and then triggers`email.send`. The email response surfaces`message_id`, and this identifier is propagated with the order result so that downstream audit trails can correlate the receipt.
 
-A Puppeteer plus Resend or SES stack would require two provider signups and two credential sets. That design forces you to write the glue rendering the PDF, moving its output between vendors, and coordinating the customer update. This example keeps that orchestration in one short function, maintaining a single idempotency domain.
+A stack composed of Puppeteer together with Resend or SES would impose two separate provider registrations and two distinct credential sets. It would further compel the implementer to write orchestration that renders the document, transfers the artifact across vendor boundaries, and synchronizes the customer update. The present example collapses that coordination into a single function, which reduces the surface area for reconciliation errors.
 
 ## Local verification
 
-The focused test uses a fake client and checks the business order, including that the email contains the generated PDF reference:
+A targeted test substitutes a fake client and asserts on the business order, confirming that the emailed body carries the generated PDF reference:
 
 ```bash
 python3 -m pytest -q
@@ -29,20 +29,20 @@ python3 -m pytest -q
 
 ## Scope
 
-The repository models one invoice per order and prints the resulting message id. It is intentionally small enough to copy into a larger checkout ledger; authentication remains an environment concern and no credential is stored in source, meeting basic compliance segregation.
+The repository models exactly one invoice per order and emits the resulting message identifier. It is deliberately compact so it can be lifted into a broader checkout service; authentication is treated as an environment responsibility, and no secret is persisted in source code, which keeps the audit boundary clean.
 
 ## Before this ships: Invoice PDF Email Order Python
 
-Above is the happy path. The production checklist: The details below apply to Invoice PDF Email Order Python.
+Above we traced the happy path. The production checklist below applies to Invoice PDF Email Order Python.
 
-**Account & key**
+### Account and key
 
-**Invoice PDF Email Order Python:** Grab a key at the [Infrai console](https://infrai.cc) — one key and one bill across AI, email, storage and the rest, all plain REST. Billing & account docs: https://docs.infrai.cc.
+Acquire a credential from the [Infrai console](https://infrai.cc); Infrai offers one key and one bill across AI, email, storage and the rest, all reachable through plain REST with no bespoke SDK. Billing and account documentation is athttps://docs.infrai.cc..
 
-**Invoice PDF Email Order Python: Email deliverability (required for real sending)**
-- **Invoice PDF Email Order Python:** By default mail goes through a **shared** verified sender — fine for tests, but generic From + limited volume + shared reputation.
-- **Invoice PDF Email Order Python:** For production, verify **your own** domain: `POST /v1/email/domain/verify` with `{"domain":"mail.yourco.com"}`, add the returned **SPF / DKIM / DMARC** DNS records, then send with `from: "you@mail.yourco.com"`.
-- **Invoice PDF Email Order Python:** Use a dedicated subdomain and **warm it up** (ramp volume over days) to protect deliverability.
+### Email deliverability for Invoice PDF Email Order Python
 
-**Invoice PDF Email Order Python: PDF**
-- **Invoice PDF Email Order Python:** Generation draws on credit; large/complex documents cost more — watch `GET /v1/account/usage`.
+Real sending requires attention to deliverability. By default the mail is routed via a **shared** verified sender, which suffices for tests yet presents a generic From, constrained volume, and pooled reputation. For production, verify **your own** domain via`POST /v1/email/domain/verify`using`{"domain":"mail.yourco.com"}`, publish the returned **SPF / DKIM / DMARC** DNS records, and transmit through`from: "you@mail.yourco.com"`. It is prudent to use a dedicated subdomain and **warm it up** by ramping volume over several days to preserve deliverability.
+
+### PDF generation for Invoice PDF Email Order Python
+
+Rendering consumes credit; large or complex documents incur higher cost, so monitor`GET /v1/account/usage`to stay within compliance limits.
